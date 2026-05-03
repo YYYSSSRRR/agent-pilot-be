@@ -45,7 +45,7 @@ func initWebServer() *App {
 	// 构建 system prompt
 	systemMsg := chat.BuildSystemPrompt(skillReg.List())
 
-	mongoDB := ioc.InitMongoDatabase(conf.MongoDBUri, conf.Database)
+	mongoDB := ioc.InitMongoDatabase(conf.MongoDBUri, conf.MongoDBDatabase)
 	agentDao := dao.NewAgentDao(mongoDB)
 	memService := memory.NewMemoryService(agentDao)
 	sch := scheduler.NewScheduler(memService)

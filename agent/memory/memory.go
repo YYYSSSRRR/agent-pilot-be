@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 
+	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
+
 	atype "github.com/agent-pilot/agent-pilot-be/agent/type"
 	"github.com/agent-pilot/agent-pilot-be/repository/dao"
 	"github.com/google/uuid"
@@ -31,6 +34,14 @@ type MemoryService interface {
 	GetStepMessages(ctx context.Context, planID, stepID string) ([]atype.Message, error)
 
 	BuildExecutionContext(ctx context.Context, planID string) (*ExecutionContext, error)
+
+	// WebSocket / eino：图检查点与中断恢复元数据（需 Mongo AgentDao）。
+	GraphCheckPointStore() compose.CheckPointStore
+	SaveWSResume(ctx context.Context, sessionID string, snap *WSResumeSnapshot) error
+	LoadWSResume(ctx context.Context, sessionID string) (*WSResumeSnapshot, error)
+	ConsumeWSResume(ctx context.Context, sessionID string) error
+	SaveWSHistory(ctx context.Context, sessionID string, history []*schema.Message) error
+	LoadWSHistory(ctx context.Context, sessionID string) ([]*schema.Message, error)
 }
 
 type ExecutionContext struct {
@@ -281,3 +292,5 @@ func (s *memoryService) getStep(steps []atype.Step, stepID string) *atype.Step {
 	}
 	return step
 }
+
+type Memory []*schema.Message
