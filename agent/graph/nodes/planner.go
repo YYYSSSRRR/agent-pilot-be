@@ -4,9 +4,9 @@ import (
 	"context"
 
 	actx "github.com/agent-pilot/agent-pilot-be/agent/context"
+	"github.com/agent-pilot/agent-pilot-be/agent/event"
 	"github.com/agent-pilot/agent-pilot-be/agent/memory"
 	"github.com/agent-pilot/agent-pilot-be/agent/plan"
-	"github.com/agent-pilot/agent-pilot-be/agent/scheduler"
 	atype "github.com/agent-pilot/agent-pilot-be/agent/type"
 )
 
@@ -25,17 +25,12 @@ func NewPlannerNode(memory memory.MemoryService, planner plan.Planner, ctxb *act
 }
 
 func (n *PlannerNode) Invoke(ctx context.Context, state *State) (*State, error) {
-	if state.Decision.Action != scheduler.ActionPlan {
-		return state, nil
-	}
-
-	var plans []atype.Plan
-	plans, err := n.memory.ListSessionPlans(ctx, state.Request.SessionID, 5)
+	plans, err := n.memory.ListPlansBySession(ctx, state.Request.SessionID, 5)
 	if err != nil {
 		return nil, err
 	}
 
-	ctxMsgs, err := n.ctxb.BuildPlanContext(state.Request, plans)
+	ctxMsgs, err := n.ctxb.BuildPlanContext(*state.Request, plans)
 	if err != nil {
 		return nil, err
 	}
@@ -43,29 +38,41 @@ func (n *PlannerNode) Invoke(ctx context.Context, state *State) (*State, error) 
 	req := state.Request
 	req.History = ctxMsgs
 
-	p, err := n.memory.CreatePlan(ctx, req.SessionID, req.UserInput)
+	newPlan, err := n.planner.Plan(ctx, *req)
 	if err != nil {
 		return nil, err
 	}
 
-	newPlan, err := n.planner.Plan(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	p.Goal = newPlan.Goal
-	p.Steps = newPlan.Steps
-	p.Status = atype.StatusReady
-
-	if err := n.memory.SavePlan(ctx, p); err != nil {
+	if err := n.memory.SavePlan(ctx, newPlan); err != nil {
 		return nil, err
 	}
 
-	state.Plan = p
-	state.Decision = &scheduler.Decision{
-		Action:  scheduler.ActionExecute,
-		Session: state.Decision.Session,
-		Plan:    p,
-		Step:    &p.Steps[0],
+	rt := &atype.Runtime{
+		SessionID: state.Request.SessionID,
+		PlanID:    newPlan.ID,
+		Status:    atype.RuntimePendingPlanApproval,
 	}
+	if len(newPlan.Steps) > 0 {
+		rt.StepID = newPlan.Steps[0].ID
+	}
+	if err := n.memory.SaveRuntime(ctx, rt); err != nil {
+		return nil, err
+	}
+
+	state.Plan = newPlan
+	state.Runtime = rt
+	state.Result = &atype.Result{
+		Plan:    newPlan,
+		Summary: "plan created",
+	}
+
+	if bus := event.FromBus(ctx); bus != nil {
+		bus.Publish(state.Request.SessionID, event.EventPlanCreated, map[string]any{
+			"plan_id": newPlan.ID,
+			"goal":    newPlan.Goal,
+			"steps":   len(newPlan.Steps),
+		})
+	}
+
 	return state, nil
 }

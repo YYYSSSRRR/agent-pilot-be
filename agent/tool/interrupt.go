@@ -34,6 +34,14 @@ After calling this tool the agent MUST stop execution immediately.
 				Type:     schema.String,
 				Required: true,
 			},
+			"kind": {
+				Type:     schema.String,
+				Required: true,
+				Enum: []string{
+					"missing_info",
+					"approval",
+				},
+			},
 		}),
 	}, nil
 }

@@ -8,41 +8,35 @@ import (
 	"github.com/agent-pilot/agent-pilot-be/repository/model"
 	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 type AgentDao interface {
-	CreateChatSession(ctx context.Context, userID string) (atype.Session, error)
-	GetChatSession(ctx context.Context, chatSessionID string) (atype.Session, error)
+	//session
+	CreateChatSession(ctx context.Context, userID string) (*atype.Session, error)
+	GetChatSession(ctx context.Context, chatSessionID string) (*atype.Session, error)
 
-	UpdateActivePlan(ctx context.Context, chatSessionID string, planID string) error
-	CleanActivePlan(ctx context.Context, planID string) error
-	InsertPlan(ctx context.Context, p *atype.Plan) error
+	//plan（仅用于展示，不维护状态）
+	SavePlan(ctx context.Context, p *atype.Plan) error
 	GetPlan(ctx context.Context, planID string) (*atype.Plan, error)
-	ListPlansBySession(ctx context.Context, sessionID string, limit int) ([]atype.Plan, error)
-	UpdatePlanStatus(ctx context.Context, planID string, status atype.Status) error
-	ReplacePlan(ctx context.Context, p *atype.Plan) error
+	ListPlansBySession(ctx context.Context, sessionID string, limit int) ([]*atype.Plan, error)
 
-	UpdateCurrentStepID(ctx context.Context, planID string, stepID string) error
-	UpdateStepStatus(ctx context.Context, planID string, stepID string, status atype.StepStatus) error
-	UpdateStepResult(ctx context.Context, planID string, stepID string, result string) error
-
-	SaveCheckpoint(ctx context.Context, planID string, checkpoint *atype.Checkpoint) error
-	ClearCheckpoint(ctx context.Context, planID string) error
-
+	//message
 	AppendMessage(ctx context.Context, msg []*atype.Message) error
-	GetPlanMessages(ctx context.Context, planID string) ([]atype.Message, error)
-	GetStepMessages(ctx context.Context, planID string, stepID string) ([]atype.Message, error)
+	GetMessages(ctx context.Context, sessionID string) ([]*atype.Message, error)
+	GetPlanMessages(ctx context.Context, planID string) ([]*atype.Message, error)
+	GetStepMessages(ctx context.Context, planID string, stepID string) ([]*atype.Message, error)
+	InsertMessages(ctx context.Context, docs []any) error //runtime(唯一执行状态)
+	GetRuntime(ctx context.Context, sessionID string) (*atype.Runtime, bool, error)
+	SaveRuntime(ctx context.Context, rt *atype.Runtime) error
+	DeleteRuntime(ctx context.Context, sessionID string) error
 
-	// WS 长连接：eino 图检查点与中断恢复元数据（按 session_id / compose CheckPointID）。
+	//graph checkpoint store,给 compose.CheckPointStore 用
 	WSRuntimeGraphGet(ctx context.Context, sessionID string) ([]byte, bool, error)
 	WSRuntimeGraphSet(ctx context.Context, sessionID string, graph []byte) error
-	WSRuntimeHistoryGet(ctx context.Context, sessionID string) ([]byte, bool, error)
-	WSRuntimeHistorySet(ctx context.Context, sessionID string, historyJSON []byte) error
-	WSRuntimeResumeGet(ctx context.Context, sessionID string) (WSRuntimeResume, bool, error)
-	WSRuntimeResumeSet(ctx context.Context, sessionID string, rec WSRuntimeResume) error
-	WSRuntimeResumeClear(ctx context.Context, sessionID string) error
+
 }
 
 type agentDao struct {
@@ -61,7 +55,8 @@ func NewAgentDao(db *mongo.Database) AgentDao {
 	}
 }
 
-func (ad *agentDao) CreateChatSession(ctx context.Context, userID string) (atype.Session, error) {
+// session
+func (d *agentDao) CreateChatSession(ctx context.Context, userID string) (*atype.Session, error) {
 	now := time.Now()
 	m := model.ChatSession{
 		ID:        uuid.New().String(),
@@ -69,80 +64,67 @@ func (ad *agentDao) CreateChatSession(ctx context.Context, userID string) (atype
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	_, err := ad.chatSessionCol.InsertOne(ctx, &m)
+	_, err := d.chatSessionCol.InsertOne(ctx, &m)
 	if err != nil {
-		return atype.Session{}, err
+		return nil, err
 	}
-	return sessionFromChatSession(m), nil
+	return sessionFromChatSession(&m), nil
 }
 
-func (ad *agentDao) GetChatSession(ctx context.Context, chatSessionID string) (atype.Session, error) {
+func (d *agentDao) GetChatSession(ctx context.Context, chatSessionID string) (*atype.Session, error) {
 	var m model.ChatSession
-	err := ad.chatSessionCol.FindOne(ctx, bson.M{"_id": chatSessionID}).Decode(&m)
+	err := d.chatSessionCol.FindOne(ctx, bson.M{"_id": chatSessionID}).Decode(&m)
 	if err != nil {
-		return atype.Session{}, err
+		return nil, err
 	}
-	return sessionFromChatSession(m), nil
+	return sessionFromChatSession(&m), nil
 }
 
-func (ad *agentDao) UpdateActivePlan(ctx context.Context, chatSessionID string, planID string) error {
-	_, err := ad.chatSessionCol.UpdateOne(
-		ctx,
-		bson.M{"_id": chatSessionID},
-		bson.M{"$set": bson.M{
-			"current_plan_id": planID,
-			"updated_at":      time.Now(),
-		}},
-	)
-	return err
-}
-
-func (ad *agentDao) CleanActivePlan(ctx context.Context, planID string) error {
-	if planID == "" {
-		return nil
-	}
-	_, err := ad.chatSessionCol.UpdateMany(
-		ctx,
-		bson.M{"current_plan_id": planID},
-		bson.M{"$set": bson.M{
-			"current_plan_id": "",
-			"updated_at":      time.Now(),
-		}},
-	)
-	return err
-}
-
-func (ad *agentDao) InsertPlan(ctx context.Context, p *atype.Plan) error {
-	if p == nil {
+// plan
+func (d *agentDao) SavePlan(ctx context.Context, plan *atype.Plan) error {
+	if plan == nil {
 		return nil
 	}
 	now := time.Now()
-	if p.CreatedAt.IsZero() {
-		p.CreatedAt = now
+	//如果新建：重新生成id
+	if plan.ID == "" {
+		plan.ID = primitive.NewObjectID().Hex()
 	}
-	p.UpdatedAt = now
-	rec := modelFromPlan(p)
-	_, err := ad.planCol.InsertOne(ctx, rec)
+	if plan.CreatedAt.IsZero() {
+		plan.CreatedAt = now
+	}
+	plan.UpdatedAt = now
+	doc := modelFromPlan(plan)
+	_, err := d.planCol.UpdateOne(
+		ctx,
+		bson.M{
+			"_id": doc.ID,
+		},
+		bson.M{
+			"$set": doc,
+		},
+		options.Update().SetUpsert(true),
+	)
 	return err
 }
 
-func (ad *agentDao) GetPlan(ctx context.Context, planID string) (*atype.Plan, error) {
+func (d *agentDao) GetPlan(ctx context.Context, planID string) (*atype.Plan, error) {
 	var r model.Plan
-	err := ad.planCol.FindOne(ctx, bson.M{"_id": planID}).Decode(&r)
+	err := d.planCol.FindOne(ctx, bson.M{"_id": planID}).Decode(&r)
 	if err != nil {
 		return nil, err
 	}
 	return planFromModel(&r), nil
 }
 
-func (ad *agentDao) ListPlansBySession(ctx context.Context, sessionID string, limit int) ([]atype.Plan, error) {
+func (d *agentDao) ListPlansBySession(ctx context.Context, sessionID string, limit int) ([]*atype.Plan, error) {
 	if sessionID == "" {
 		return nil, nil
 	}
 	if limit <= 0 {
 		limit = 5
 	}
-	cur, err := ad.planCol.Find(
+	cur, err := d.planCol.Find(
 		ctx,
 		bson.M{"session_id": sessionID},
 		options.Find().
@@ -154,7 +136,7 @@ func (ad *agentDao) ListPlansBySession(ctx context.Context, sessionID string, li
 	}
 	defer cur.Close(ctx)
 
-	out := make([]atype.Plan, 0, limit)
+	out := make([]*atype.Plan, 0, limit)
 	for cur.Next(ctx) {
 		var r model.Plan
 		if err := cur.Decode(&r); err != nil {
@@ -164,107 +146,13 @@ func (ad *agentDao) ListPlansBySession(ctx context.Context, sessionID string, li
 		if p == nil {
 			continue
 		}
-		out = append(out, *p)
+		out = append(out, p)
 	}
 	return out, cur.Err()
 }
 
-func (ad *agentDao) UpdatePlanStatus(ctx context.Context, planID string, status atype.Status) error {
-	_, err := ad.planCol.UpdateOne(
-		ctx,
-		bson.M{"_id": planID},
-		bson.M{"$set": bson.M{
-			"status":     status,
-			"updated_at": time.Now(),
-		}},
-	)
-	return err
-}
-
-func (ad *agentDao) ReplacePlan(ctx context.Context, p *atype.Plan) error {
-	if p == nil {
-		return nil
-	}
-	p.UpdatedAt = time.Now()
-	rec := modelFromPlan(p)
-	_, err := ad.planCol.ReplaceOne(ctx, bson.M{"_id": rec.ID}, rec)
-	return err
-}
-
-func (ad *agentDao) UpdateCurrentStepID(ctx context.Context, planID string, stepID string) error {
-	_, err := ad.planCol.UpdateOne(
-		ctx,
-		bson.M{"_id": planID},
-		bson.M{"$set": bson.M{
-			"current_step_id": stepID,
-			"updated_at":      time.Now(),
-		}},
-	)
-	return err
-}
-
-func (ad *agentDao) UpdateStepStatus(ctx context.Context, planID string, stepID string, status atype.StepStatus) error {
-	_, err := ad.planCol.UpdateOne(
-		ctx,
-		bson.M{"_id": planID},
-		bson.M{"$set": bson.M{
-			"steps.$[s].status": status,
-			"updated_at":        time.Now(),
-		}},
-		options.Update().SetArrayFilters(options.ArrayFilters{
-			Filters: []any{bson.M{"s.id": stepID}},
-		}),
-	)
-	return err
-}
-
-func (ad *agentDao) UpdateStepResult(ctx context.Context, planID string, stepID string, result string) error {
-	_, err := ad.planCol.UpdateOne(
-		ctx,
-		bson.M{"_id": planID},
-		bson.M{"$set": bson.M{
-			"steps.$[s].result": result,
-			"updated_at":        time.Now(),
-		}},
-		options.Update().SetArrayFilters(options.ArrayFilters{
-			Filters: []any{bson.M{"s.id": stepID}},
-		}),
-	)
-	return err
-}
-
-func (ad *agentDao) SaveCheckpoint(ctx context.Context, planID string, checkpoint *atype.Checkpoint) error {
-	if checkpoint == nil {
-		return ad.ClearCheckpoint(ctx, planID)
-	}
-	pc := *checkpoint
-	pc.CreatedAt = time.Now()
-	mc := modelCheckpointFromPlan(&pc)
-
-	_, err := ad.planCol.UpdateOne(
-		ctx,
-		bson.M{"_id": planID},
-		bson.M{"$set": bson.M{
-			"checkpoint": mc,
-			"updated_at": time.Now(),
-		}},
-	)
-	return err
-}
-
-func (ad *agentDao) ClearCheckpoint(ctx context.Context, planID string) error {
-	_, err := ad.planCol.UpdateOne(
-		ctx,
-		bson.M{"_id": planID},
-		bson.M{"$set": bson.M{
-			"checkpoint": nil,
-			"updated_at": time.Now(),
-		}},
-	)
-	return err
-}
-
-func (ad *agentDao) AppendMessage(ctx context.Context, messages []*atype.Message) error {
+// message
+func (d *agentDao) AppendMessage(ctx context.Context, messages []*atype.Message) error {
 	if len(messages) == 0 {
 		return nil
 	}
@@ -282,20 +170,32 @@ func (ad *agentDao) AppendMessage(ctx context.Context, messages []*atype.Message
 		docs = append(docs, agentMessageFromPlan(msg))
 	}
 
-	_, err := ad.messageCol.InsertMany(ctx, docs)
+	_, err := d.messageCol.InsertMany(ctx, docs)
 	return err
 }
 
-func (ad *agentDao) GetPlanMessages(ctx context.Context, planID string) ([]atype.Message, error) {
-	return ad.findMessages(ctx, bson.M{"plan_id": planID})
+func (d *agentDao) InsertMessages(ctx context.Context, docs []any) error {
+	if len(docs) == 0 {
+		return nil
+	}
+	_, err := d.messageCol.InsertMany(ctx, docs)
+	return err
 }
 
-func (ad *agentDao) GetStepMessages(ctx context.Context, planID string, stepID string) ([]atype.Message, error) {
-	return ad.findMessages(ctx, bson.M{"plan_id": planID, "step_id": stepID})
+func (d *agentDao) GetPlanMessages(ctx context.Context, planID string) ([]*atype.Message, error) {
+	return d.findMessages(ctx, bson.M{"plan_id": planID})
 }
 
-func (ad *agentDao) findMessages(ctx context.Context, filter bson.M) ([]atype.Message, error) {
-	cur, err := ad.messageCol.Find(
+func (d *agentDao) GetStepMessages(ctx context.Context, planID string, stepID string) ([]*atype.Message, error) {
+	return d.findMessages(ctx, bson.M{"plan_id": planID, "step_id": stepID})
+}
+
+func (d *agentDao) GetMessages(ctx context.Context, sessionID string) ([]*atype.Message, error) {
+	return d.findMessages(ctx, bson.M{"session_id": sessionID})
+}
+
+func (d *agentDao) findMessages(ctx context.Context, filter bson.M) ([]*atype.Message, error) {
+	cur, err := d.messageCol.Find(
 		ctx,
 		filter,
 		options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}}),
@@ -305,7 +205,7 @@ func (ad *agentDao) findMessages(ctx context.Context, filter bson.M) ([]atype.Me
 	}
 	defer cur.Close(ctx)
 
-	var out []atype.Message
+	var out []*atype.Message
 	for cur.Next(ctx) {
 		var m model.AgentMessage
 		if err := cur.Decode(&m); err != nil {

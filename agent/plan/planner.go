@@ -68,7 +68,6 @@ func (p *LLMPlanner) Plan(ctx context.Context, req atype.Request) (*atype.Plan, 
 		SessionID: req.SessionID,
 		Goal:      strings.TrimSpace(out.Goal),
 		Steps:     normalizeSteps(out.Steps),
-		Status:    atype.StatusReady,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -189,7 +188,6 @@ func normalizeSteps(steps []outputStep) []atype.Step {
 			ID:          fmt.Sprintf("step_%02d", i+1),
 			Title:       title,
 			Description: desc,
-			Status:      atype.StepStatusPending,
 		})
 	}
 	return out

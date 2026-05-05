@@ -45,6 +45,11 @@ func (t *ShellTool) InvokableRun(
 		return "invalid shell arguments: " + err.Error(), nil
 	}
 
+	// 审批检查：如果命令未预批准，返回待审批信号
+	if approvedCmd, ok := GetApprovedCommand(ctx); !ok || approvedCmd != input.Cmd {
+		return "SHELL_NEEDS_APPROVAL:" + input.Cmd, nil
+	}
+
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		encoded := encodePowerShellCommand(wrapPowerShellScript(input.Cmd))

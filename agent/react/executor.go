@@ -8,7 +8,8 @@ import (
 	"time"
 
 	context2 "github.com/agent-pilot/agent-pilot-be/agent/context"
-	"github.com/agent-pilot/agent-pilot-be/agent/memory"
+	"github.com/agent-pilot/agent-pilot-be/agent/event"
+	"github.com/agent-pilot/agent-pilot-be/agent/tool"
 	atype "github.com/agent-pilot/agent-pilot-be/agent/type"
 	einomodel "github.com/cloudwego/eino/components/model"
 	einotool "github.com/cloudwego/eino/components/tool"
@@ -39,8 +40,7 @@ func NewExecutor(
 	}
 }
 
-func (e *Executor) ExecuteStep(ctx context.Context, exeCtx *memory.ExecutionContext) (*atype.StepResult, error) {
-	//用来保存过程中的msg存到memory中
+func (e *Executor) ExecuteStep(ctx context.Context, exeCtx *atype.ExecutionContext, interruptCh <-chan struct{}) (*atype.StepResult, error) {
 	var executionMessages []*atype.Message
 	toolInfos, invokables, err := e.prepareTools(ctx)
 	if err != nil {
@@ -52,7 +52,6 @@ func (e *Executor) ExecuteStep(ctx context.Context, exeCtx *memory.ExecutionCont
 		return nil, err
 	}
 
-	//构建上下文信息
 	messages, err := e.contextBuilder.BuildExecutionContext(exeCtx)
 	if err != nil {
 		return nil, err
@@ -62,7 +61,54 @@ func (e *Executor) ExecuteStep(ctx context.Context, exeCtx *memory.ExecutionCont
 		schema.SystemMessage(e.systemPrompt()),
 	}, messages...)
 
+	bus := event.FromBus(ctx)
+
+	//如果已经有审批完成的工具，直接执行，否则再进入llm会死循环
+	if approvedCmd, ok := tool.GetApprovedCommand(ctx); ok && approvedCmd != "" {
+		if shellTool, ok := invokables["shell"]; ok {
+			args := fmt.Sprintf(`{"cmd":"%s"}`, strings.ReplaceAll(approvedCmd, `"`, `\"`))
+			result, err := shellTool.InvokableRun(ctx, args)
+			if err != nil {
+				result = "tool execution error: " + err.Error()
+			}
+
+			messages = append(messages, schema.ToolMessage(result, "approved_cmd", schema.WithToolName("shell")))
+			executionMessages = append(executionMessages, &atype.Message{
+				SessionID: exeCtx.SessionID,
+				PlanID:    exeCtx.Plan.ID,
+				StepID:    exeCtx.Step.ID,
+				Role:      atype.RoleToolResult,
+				Content:   result,
+				Metadata: map[string]any{
+					"tool_name": "shell",
+					"call_id":   "approved_cmd",
+				},
+				CreatedAt: time.Now(),
+			})
+
+			if bus != nil {
+				bus.Publish(exeCtx.SessionID, event.EventToolResult, map[string]any{
+					"plan_id": exeCtx.Plan.ID, "step_id": exeCtx.Step.ID,
+					"tool_name": "shell", "result": result,
+				})
+			}
+		}
+	}
+
 	for turn := 0; turn < e.maxTurns; turn++ {
+		select {
+		case <-interruptCh:
+			return &atype.StepResult{
+				StepID:     exeCtx.Step.ID,
+				Paused:     true,
+				Completed:  false,
+				Output:     "execution interrupted by user",
+				Messages:   executionMessages,
+				PausedKind: "user_interrupt",
+			}, nil
+		default:
+		}
+
 		msg, err := modelWithTools.Generate(ctx, messages)
 		if err != nil {
 			return nil, err
@@ -71,18 +117,27 @@ func (e *Executor) ExecuteStep(ctx context.Context, exeCtx *memory.ExecutionCont
 			return nil, fmt.Errorf("model returned nil message")
 		}
 
-		executionMessages = append(
-			executionMessages,
-			&atype.Message{
+		if msg.Content != "" {
+			executionMessages = append(executionMessages, &atype.Message{
 				SessionID: exeCtx.Plan.SessionID,
 				PlanID:    exeCtx.Plan.ID,
 				StepID:    exeCtx.Step.ID,
 				Role:      atype.RoleAssistant,
 				Content:   msg.Content,
 				CreatedAt: time.Now(),
-			},
-		)
-		messages = append(messages, msg)
+			})
+			messages = append(messages, msg)
+
+			if bus != nil {
+				bus.Publish(exeCtx.Plan.SessionID, event.EventMessage, map[string]any{
+					"plan_id": exeCtx.Plan.ID,
+					"step_id": exeCtx.Step.ID,
+					"content": msg.Content,
+					"role":    "assistant",
+					"type":    "plan",
+				})
+			}
+		}
 
 		if len(msg.ToolCalls) == 0 {
 			return nil, fmt.Errorf("model returned no tool call; expected complete_step or request_human_input")
@@ -90,34 +145,35 @@ func (e *Executor) ExecuteStep(ctx context.Context, exeCtx *memory.ExecutionCont
 
 		for _, call := range msg.ToolCalls {
 			toolName := call.Function.Name
-			//保存工具调用信息
-			executionMessages = append(
-				executionMessages,
-				&atype.Message{
-					SessionID: exeCtx.Plan.SessionID,
-					PlanID:    exeCtx.Plan.ID,
-					StepID:    exeCtx.Step.ID,
-					Role:      atype.RoleToolCall,
-					Content:   fmt.Sprintf("tool_name:%s,arguments:%s", call.Function.Name, call.Function.Arguments),
-					Metadata: map[string]any{
-						"tool_name": call.Function.Name,
-						"call_id":   call.ID,
-						"arguments": call.Function.Arguments,
-					},
-					CreatedAt: time.Now(),
+			executionMessages = append(executionMessages, &atype.Message{
+				SessionID: exeCtx.Plan.SessionID,
+				PlanID:    exeCtx.Plan.ID,
+				StepID:    exeCtx.Step.ID,
+				Role:      atype.RoleToolCall,
+				Content:   fmt.Sprintf("tool_name:%s,arguments:%s", call.Function.Name, call.Function.Arguments),
+				Metadata: map[string]any{
+					"tool_name": call.Function.Name,
+					"call_id":   call.ID,
+					"arguments": call.Function.Arguments,
 				},
-			)
+				CreatedAt: time.Now(),
+			})
+
+			// 发射工具调用事件
+			if bus != nil {
+				bus.Publish(exeCtx.Plan.SessionID, event.EventToolCall, map[string]any{
+					"plan_id": exeCtx.Plan.ID, "step_id": exeCtx.Step.ID,
+					"tool_name": toolName, "arguments": call.Function.Arguments,
+				})
+			}
 
 			switch call.Function.Name {
 
-			//调用中断工具：中断等待用户输入
 			case "request_human_input":
-				question, err := e.extractQuestion(call.Function.Arguments)
+				question, kind, err := e.extractHumanInput(call.Function.Arguments)
 				if err != nil {
 					return nil, fmt.Errorf("invalid request_human_input args: %w", err)
 				}
-				question = strings.TrimSpace(question)
-
 				executionMessages = append(executionMessages, &atype.Message{
 					SessionID: exeCtx.Plan.SessionID,
 					PlanID:    exeCtx.Plan.ID,
@@ -131,19 +187,24 @@ func (e *Executor) ExecuteStep(ctx context.Context, exeCtx *memory.ExecutionCont
 					CreatedAt: time.Now(),
 				})
 
+				if bus != nil {
+					bus.Publish(exeCtx.Plan.SessionID, event.EventStepPaused, map[string]any{
+						"plan_id": exeCtx.Plan.ID, "step_id": exeCtx.Step.ID,
+						"kind": kind, "question": question,
+					})
+				}
+
 				return &atype.StepResult{
-					StepID:    exeCtx.Step.ID,
-					Paused:    true,
-					Completed: false,
-					Output:    question,
-					Messages:  executionMessages,
+					StepID:     exeCtx.Step.ID,
+					Paused:     true,
+					Completed:  false,
+					Output:     question,
+					Messages:   executionMessages,
+					PausedKind: kind,
 				}, nil
 
-			//调用完成工具：
 			case "complete_step":
-				summary, err := e.extractCompleteResult(
-					call.Function.Arguments,
-				)
+				summary, err := e.extractCompleteResult(call.Function.Arguments)
 				if err != nil {
 					return nil, err
 				}
@@ -169,7 +230,6 @@ func (e *Executor) ExecuteStep(ctx context.Context, exeCtx *memory.ExecutionCont
 					Messages:  executionMessages,
 				}, nil
 
-			//其他工具调用
 			default:
 				t, ok := invokables[toolName]
 				if !ok {
@@ -181,21 +241,39 @@ func (e *Executor) ExecuteStep(ctx context.Context, exeCtx *memory.ExecutionCont
 				if err != nil {
 					result = "tool execution error: " + err.Error()
 				}
+
+				// 发射工具结果事件
+				if bus != nil {
+					bus.Publish(exeCtx.Plan.SessionID, event.EventToolResult, map[string]any{
+						"plan_id": exeCtx.Plan.ID, "step_id": exeCtx.Step.ID,
+						"tool_name": toolName, "result": result,
+					})
+				}
+
+				if strings.HasPrefix(result, "SHELL_NEEDS_APPROVAL:") {
+					cmd := strings.TrimPrefix(result, "SHELL_NEEDS_APPROVAL:")
+					return &atype.StepResult{
+						StepID:          exeCtx.Step.ID,
+						Paused:          true,
+						PausedKind:      "tool_approval",
+						Output:          "Shell command requires approval: " + cmd,
+						Messages:        executionMessages,
+						PendingToolCall: cmd,
+					}, nil
+				}
+
 				messages = append(messages, schema.ToolMessage(result, call.ID, schema.WithToolName(toolName)))
-				executionMessages = append(
-					executionMessages,
-					&atype.Message{
-						SessionID: exeCtx.Plan.SessionID,
-						PlanID:    exeCtx.Plan.ID,
-						StepID:    exeCtx.Step.ID,
-						Role:      atype.RoleToolResult,
-						Content:   result,
-						Metadata: map[string]any{
-							"tool_name": call.Function.Name,
-							"call_id":   call.ID,
-						},
+				executionMessages = append(executionMessages, &atype.Message{
+					SessionID: exeCtx.Plan.SessionID,
+					PlanID:    exeCtx.Plan.ID,
+					StepID:    exeCtx.Step.ID,
+					Role:      atype.RoleToolResult,
+					Content:   result,
+					Metadata: map[string]any{
+						"tool_name": call.Function.Name,
+						"call_id":   call.ID,
 					},
-				)
+				})
 			}
 		}
 	}
@@ -245,18 +323,16 @@ When the step is completed: return a concise result and do not proceed to other 
 `
 }
 
-func (e *Executor) extractQuestion(args string) (string, error) {
+func (e *Executor) extractHumanInput(args string) (string, string, error) {
 	var payload struct {
 		Question string `json:"question"`
+		Kind     string `json:"kind"`
 	}
-	err := json.Unmarshal(
-		[]byte(args),
-		&payload,
-	)
+	err := json.Unmarshal([]byte(args), &payload)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return strings.TrimSpace(payload.Question), nil
+	return strings.TrimSpace(payload.Question), strings.TrimSpace(payload.Kind), nil
 }
 
 func (e *Executor) extractCompleteResult(args string) (string, error) {
@@ -265,10 +341,7 @@ func (e *Executor) extractCompleteResult(args string) (string, error) {
 	}
 	var req finishArgs
 	if err := json.Unmarshal([]byte(args), &req); err != nil {
-		return "", fmt.Errorf(
-			"invalid complete_step args: %w",
-			err,
-		)
+		return "", fmt.Errorf("invalid complete_step args: %w", err)
 	}
 	req.Summary = strings.TrimSpace(req.Summary)
 	if req.Summary == "" {

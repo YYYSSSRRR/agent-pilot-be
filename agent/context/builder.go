@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/agent-pilot/agent-pilot-be/agent/memory"
 	atype "github.com/agent-pilot/agent-pilot-be/agent/type"
 	"github.com/cloudwego/eino/schema"
 )
@@ -25,7 +24,7 @@ func NewBuilder(opt Options) *Builder {
 	return &Builder{opt: opt}
 }
 
-func (b *Builder) BuildExecutionContext(execCtx *memory.ExecutionContext) ([]*schema.Message, error) {
+func (b *Builder) BuildExecutionContext(execCtx *atype.ExecutionContext) ([]*schema.Message, error) {
 	var out []*schema.Message
 
 	var ctx strings.Builder
@@ -40,12 +39,6 @@ func (b *Builder) BuildExecutionContext(execCtx *memory.ExecutionContext) ([]*sc
 	ctx.WriteString(execCtx.Step.Description)
 	ctx.WriteString("\n\n")
 
-	if execCtx.IsResume && execCtx.Checkpoint != nil {
-		ctx.WriteString("Resume Context:\n")
-		ctx.WriteString(execCtx.Checkpoint.Question)
-		ctx.WriteString("\n\n")
-	}
-
 	out = append(out, schema.UserMessage(ctx.String()))
 	msgs, err := b.build(execCtx.Messages)
 	if err != nil {
@@ -55,7 +48,7 @@ func (b *Builder) BuildExecutionContext(execCtx *memory.ExecutionContext) ([]*sc
 	return out, nil
 }
 
-func (b *Builder) BuildPlanContext(req atype.Request, plans []atype.Plan) ([]*schema.Message, error) {
+func (b *Builder) BuildPlanContext(req atype.Request, plans []*atype.Plan) ([]*schema.Message, error) {
 	out := make([]*schema.Message, 0, 2)
 	if strings.TrimSpace(b.opt.SystemPrompt) != "" {
 		out = append(out, schema.SystemMessage(strings.TrimSpace(b.opt.SystemPrompt)))
@@ -64,7 +57,7 @@ func (b *Builder) BuildPlanContext(req atype.Request, plans []atype.Plan) ([]*sc
 	return out, nil
 }
 
-func (b *Builder) planContext(req atype.Request, plans []atype.Plan) string {
+func (b *Builder) planContext(req atype.Request, plans []*atype.Plan) string {
 	var sb strings.Builder
 	sb.WriteString("User request:\n")
 	sb.WriteString(strings.TrimSpace(req.UserInput))
@@ -89,10 +82,6 @@ func (b *Builder) planContext(req atype.Request, plans []atype.Plan) string {
 			sb.WriteString(" goal=")
 			sb.WriteString(trimForPrompt(p.Goal, 160))
 		}
-		if p.Status != "" {
-			sb.WriteString(" status=")
-			sb.WriteString(string(p.Status))
-		}
 		if !p.UpdatedAt.IsZero() {
 			sb.WriteString(" updated_at=")
 			sb.WriteString(p.UpdatedAt.Format("2006-01-02 15:04:05"))
@@ -108,10 +97,6 @@ func (b *Builder) planContext(req atype.Request, plans []atype.Plan) string {
 				sb.WriteString(" title=")
 				sb.WriteString(trimForPrompt(st.Title, 120))
 			}
-			if st.Status != "" {
-				sb.WriteString(" status=")
-				sb.WriteString(string(st.Status))
-			}
 			if strings.TrimSpace(st.Result) != "" {
 				sb.WriteString(" result=")
 				sb.WriteString(trimForPrompt(st.Result, 160))
@@ -124,7 +109,7 @@ func (b *Builder) planContext(req atype.Request, plans []atype.Plan) string {
 }
 
 // 把atype.Message转换为schema.Message
-func (b *Builder) build(messages []atype.Message) ([]*schema.Message, error) {
+func (b *Builder) build(messages []*atype.Message) ([]*schema.Message, error) {
 	out := make([]*schema.Message, 0, len(messages)+1)
 	if strings.TrimSpace(b.opt.SystemPrompt) != "" {
 		out = append(out, schema.SystemMessage(strings.TrimSpace(b.opt.SystemPrompt)))
@@ -137,7 +122,7 @@ func (b *Builder) build(messages []atype.Message) ([]*schema.Message, error) {
 
 	for i := start; i < len(messages); i++ {
 		m := messages[i]
-		sm, err := toSchemaMessage(m, b.opt)
+		sm, err := toSchemaMessage(*m, b.opt)
 		if err != nil {
 			return nil, fmt.Errorf("build ctx: message[%d] (%s): %w", i, m.ID, err)
 		}

@@ -9,7 +9,6 @@ import (
 	"github.com/agent-pilot/agent-pilot-be/agent/memory"
 	agentplan "github.com/agent-pilot/agent-pilot-be/agent/plan"
 	"github.com/agent-pilot/agent-pilot-be/agent/react"
-	"github.com/agent-pilot/agent-pilot-be/agent/scheduler"
 	"github.com/agent-pilot/agent-pilot-be/agent/tool"
 	"github.com/agent-pilot/agent-pilot-be/agent/tool/skill"
 	"github.com/agent-pilot/agent-pilot-be/config"
@@ -48,7 +47,6 @@ func initWebServer() *App {
 	mongoDB := ioc.InitMongoDatabase(conf.MongoDBUri, conf.MongoDBDatabase)
 	agentDao := dao.NewAgentDao(mongoDB)
 	memService := memory.NewMemoryService(agentDao)
-	sch := scheduler.NewScheduler(memService)
 	planner := agentplan.NewLLMPlanner(om.Model, skillReg)
 	ctxBuilder := agentcontext.NewBuilder(agentcontext.Options{
 		SystemPrompt: systemMsg,
@@ -56,12 +54,14 @@ func initWebServer() *App {
 	})
 	executor := react.NewExecutor(om.Model, tools, ctxBuilder)
 
-	schNode := nodes.NewSchedulerNode(sch)
+	schNode := nodes.NewSchedulerNode()
 	plannerNode := nodes.NewPlannerNode(memService, planner, ctxBuilder)
 	executorNode := nodes.NewExecutorNode(memService, executor)
-	agentGraph := graph.NewAgentGraph(schNode, plannerNode, executorNode)
+	agentGraph := graph.NewAgentGraph(schNode, plannerNode, executorNode, memService)
 
 	cc := chat.NewController(context.Background(), skillReg, systemMsg, memService, agentGraph)
+
+	// Agent 核心服务（传输层无关，供 WS 等后续使用）
 
 	//pkg
 	redisJWTHandler := jwt.NewRedisJWTHandler(conf.JwtConf)

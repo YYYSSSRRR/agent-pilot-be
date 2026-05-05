@@ -4,31 +4,51 @@ import (
 	"context"
 
 	"github.com/agent-pilot/agent-pilot-be/agent/scheduler"
+	atype "github.com/agent-pilot/agent-pilot-be/agent/type"
 )
 
 type SchedulerNode struct {
-	scheduler *scheduler.Scheduler
 }
 
-func NewSchedulerNode(s *scheduler.Scheduler) Node {
-	return &SchedulerNode{
-		scheduler: s,
-	}
+func NewSchedulerNode() Node {
+	return &SchedulerNode{}
 }
 
 func (n *SchedulerNode) Invoke(ctx context.Context, state *State) (*State, error) {
-	decision := state.Decision
-	if decision == nil {
-		d, err := n.scheduler.Decide(
-			ctx,
-			state.Request.SessionID,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		decision = d
+	if state == nil {
+		state = &State{}
 	}
-	state.Decision = decision
+
+	state.Decision = &scheduler.Decision{}
+
+	rt := state.Runtime
+
+	// 恢复后的决策
+	if rt != nil && rt.Status == atype.RuntimeApproved {
+		switch rt.InterruptKind {
+		case "tool_approval":
+			if !rt.PendingToolApproved {
+				// 用户拒绝了工具调用 → 重新规划
+				state.Decision.Action = scheduler.ActionPlan
+				return state, nil
+			}
+			state.Decision.Action = scheduler.ActionExecute
+			return state, nil
+		case "plan_approval":
+			if rt.PlanAction == "rejected" {
+				state.Decision.Action = scheduler.ActionPlan
+				return state, nil
+			}
+			state.Decision.Action = scheduler.ActionExecute
+			return state, nil
+		}
+	}
+
+	//  正常流程
+	if state.Runtime == nil || state.Runtime.PlanID == "" {
+		state.Decision.Action = scheduler.ActionPlan
+	} else {
+		state.Decision.Action = scheduler.ActionExecute
+	}
 	return state, nil
 }

@@ -5,14 +5,19 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/agent-pilot/agent-pilot-be/agent/event"
 	"github.com/agent-pilot/agent-pilot-be/agent/graph"
 	"github.com/agent-pilot/agent-pilot-be/agent/graph/nodes"
 	"github.com/agent-pilot/agent-pilot-be/agent/memory"
+	"github.com/agent-pilot/agent-pilot-be/agent/tool"
 	atype "github.com/agent-pilot/agent-pilot-be/agent/type"
 	"github.com/agent-pilot/agent-pilot-be/pkg/jwt"
+	"github.com/agent-pilot/agent-pilot-be/transport"
 	"github.com/cloudwego/eino/compose"
 	"github.com/gin-gonic/gin"
+	"golang.org/x/net/websocket"
 
 	"github.com/agent-pilot/agent-pilot-be/agent/tool/skill"
 	pkgmodel "github.com/agent-pilot/agent-pilot-be/model"
@@ -32,6 +37,7 @@ type Controller struct {
 	Graph     *graph.AgentGraph
 	Runnable  compose.Runnable[*nodes.State, *atype.Result]
 	Memory    memory.MemoryService
+	Bus       *event.Bus
 	mu        sync.Mutex
 }
 
@@ -52,6 +58,7 @@ func NewController(
 		Graph:     graph,
 		Runnable:  runnable,
 		Memory:    memory,
+		Bus:       event.NewBus(),
 	}
 }
 
@@ -128,7 +135,8 @@ func (c *Controller) ChatSync(ctx *gin.Context, req request) (pkgmodel.Response,
 		SessionID: req.SessionID,
 		UserInput: req.Message,
 	}
-	result, err := c.Runnable.Invoke(ctx.Request.Context(), &nodes.State{Request: request})
+	ctx2 := event.WithBus(ctx.Request.Context(), c.Bus)
+	result, err := c.Runnable.Invoke(ctx2, &nodes.State{Request: &request})
 	if err != nil {
 		return pkgmodel.Response{}, err
 	}
@@ -429,6 +437,78 @@ When you decide to use a skill:
 `)
 
 	return sb.String()
+}
+
+// ChatWS 处理 WebSocket 连接。通过 session_id 查询参数区分会话。
+func (c *Controller) ChatWS(ctx *gin.Context) {
+	sessionID := ctx.Query("session_id")
+	if sessionID == "" {
+		sessionID = "default"
+	}
+
+	wsHandler := transport.NewHandler(c.Bus, func(ctx context.Context, sid string, msg transport.WSMsg) {
+		switch msg.Type {
+		case "execute":
+			if rt, ok, err := c.Memory.GetRuntime(ctx, sid); err == nil && ok && rt.PlanID != "" {
+				c.Memory.AppendMessage(ctx, []*atype.Message{{
+					SessionID: sid, PlanID: rt.PlanID, StepID: rt.StepID,
+					Role: atype.RoleUser, Content: msg.Data, CreatedAt: time.Now(),
+				}})
+			}
+			req := atype.Request{SessionID: sid, UserInput: msg.Data}
+			ctx2 := event.WithBus(ctx, c.Bus)
+			_, _ = c.Runnable.Invoke(ctx2, &nodes.State{Request: &req})
+
+		case "approve":
+			rt, ok, err := c.Memory.GetRuntime(ctx, sid)
+			if err == nil && ok && rt != nil {
+				rt.PendingToolApproved = true
+				rt.Status = atype.RuntimeApproved
+				_ = c.Memory.SaveRuntime(ctx, rt)
+			}
+			ctx2 := tool.WithApprovedCommand(event.WithBus(ctx, c.Bus), msg.Data)
+			_, _ = c.Runnable.Invoke(ctx2, &nodes.State{Request: &atype.Request{SessionID: sid}})
+
+		case "reject":
+			rt, ok, err := c.Memory.GetRuntime(ctx, sid)
+			if err == nil && ok && rt != nil {
+				rt.Status = atype.RuntimeApproved
+				_ = c.Memory.SaveRuntime(ctx, rt)
+			}
+			ctx2 := event.WithBus(ctx, c.Bus)
+			_, _ = c.Runnable.Invoke(ctx2, &nodes.State{Request: &atype.Request{SessionID: sid}})
+
+		case "plan_approve":
+			rt, ok, err := c.Memory.GetRuntime(ctx, sid)
+			if err == nil && ok && rt != nil {
+				rt.Status = atype.RuntimeApproved
+				rt.PlanAction = "approved"
+				_ = c.Memory.SaveRuntime(ctx, rt)
+			}
+			ctx2 := event.WithBus(ctx, c.Bus)
+			_, _ = c.Runnable.Invoke(ctx2, &nodes.State{Request: &atype.Request{SessionID: sid}})
+
+		case "plan_reject":
+			rt, ok, err := c.Memory.GetRuntime(ctx, sid)
+			if err == nil && ok && rt != nil {
+				rt.Status = atype.RuntimeApproved
+				rt.PlanAction = "rejected"
+				_ = c.Memory.SaveRuntime(ctx, rt)
+			}
+			ctx2 := event.WithBus(ctx, c.Bus)
+			_, _ = c.Runnable.Invoke(ctx2, &nodes.State{Request: &atype.Request{SessionID: sid}})
+
+		case "interrupt":
+			rt, ok, err := c.Memory.GetRuntime(ctx, sid)
+			if err == nil && ok && rt != nil {
+				rt.InterruptRequested = true
+				_ = c.Memory.SaveRuntime(ctx, rt)
+			}
+			c.Graph.SignalInterrupt(sid)
+		}
+	})
+
+	websocket.Server{Handler: wsHandler.ServeWS}.ServeHTTP(ctx.Writer, ctx.Request)
 }
 
 // CreateSession 创建新对话

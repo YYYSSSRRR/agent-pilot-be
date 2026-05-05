@@ -18,4 +18,7 @@ func registerChat(s *gin.RouterGroup, l *middleware.LoggerMiddleware, authMiddle
 	chatGroup.POST("/session", ginx.WrapClaims(c.CreateSession))
 	//chatGroup.POST("/plan", c.Plan)
 	//chatGroup.POST("/execute", c.Execute)
+
+	// WS 单独注册（无 auth，使用 session_id 作为会话标识）
+	s.GET("/chat/ws", c.ChatWS)
 }

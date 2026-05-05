@@ -12,34 +12,18 @@ func planFromModel(r *model.Plan) *atype.Plan {
 	steps := make([]atype.Step, len(r.Steps))
 	for i, s := range r.Steps {
 		steps[i] = atype.Step{
-			ID:          s.ID,
-			Title:       s.Title,
-			Description: s.Description,
-			Result:      s.Result,
-			Status:      atype.StepStatus(s.Status),
+			ID:     s.ID,
+			Title:  s.Title,
+			Result: s.Result,
 		}
 	}
 	return &atype.Plan{
-		ID:            r.ID,
-		SessionID:     r.SessionID,
-		Goal:          r.Goal,
-		Steps:         steps,
-		Status:        atype.Status(r.Status),
-		CurrentStepID: r.CurrentStepID,
-		CreatedAt:     r.CreatedAt,
-		UpdatedAt:     r.UpdatedAt,
-	}
-}
-
-func checkpointFromModel(m *model.Checkpoint) *atype.Checkpoint {
-	if m == nil {
-		return nil
-	}
-	return &atype.Checkpoint{
-		ID:        m.ID,
-		StepID:    m.StepID,
-		Question:  m.Question,
-		CreatedAt: m.CreatedAt,
+		ID:        r.ID,
+		SessionID: r.SessionID,
+		Goal:      r.Goal,
+		Steps:     steps,
+		CreatedAt: r.CreatedAt,
+		UpdatedAt: r.UpdatedAt,
 	}
 }
 
@@ -50,49 +34,32 @@ func modelFromPlan(p *atype.Plan) *model.Plan {
 	steps := make([]model.Step, len(p.Steps))
 	for i, s := range p.Steps {
 		steps[i] = model.Step{
-			ID:          s.ID,
-			Title:       s.Title,
-			Description: s.Description,
-			Result:      s.Result,
-			Status:      string(s.Status),
+			ID:     s.ID,
+			Title:  s.Title,
+			Result: s.Result,
 		}
 	}
 	return &model.Plan{
-		ID:            p.ID,
-		SessionID:     p.SessionID,
-		Goal:          p.Goal,
-		Steps:         steps,
-		Status:        string(p.Status),
-		CurrentStepID: p.CurrentStepID,
-		CreatedAt:     p.CreatedAt,
-		UpdatedAt:     p.UpdatedAt,
+		ID:        p.ID,
+		SessionID: p.SessionID,
+		Goal:      p.Goal,
+		Steps:     steps,
+		CreatedAt: p.CreatedAt,
+		UpdatedAt: p.UpdatedAt,
 	}
 }
 
-func modelCheckpointFromPlan(c *atype.Checkpoint) *model.Checkpoint {
-	if c == nil {
-		return nil
-	}
-	return &model.Checkpoint{
-		ID:        c.ID,
-		StepID:    c.StepID,
-		Question:  c.Question,
-		CreatedAt: c.CreatedAt,
+func sessionFromChatSession(m *model.ChatSession) *atype.Session {
+	return &atype.Session{
+		ID:        m.ID,
+		UserID:    m.UserID,
+		CreatedAt: m.CreatedAt,
+		UpdatedAt: m.UpdatedAt,
 	}
 }
 
-func sessionFromChatSession(m model.ChatSession) atype.Session {
-	return atype.Session{
-		ID:            m.ID,
-		UserID:        m.UserID,
-		CurrentPlanID: m.CurrentPlanID,
-		CreatedAt:     m.CreatedAt,
-		UpdatedAt:     m.UpdatedAt,
-	}
-}
-
-func messageFromAgent(m *model.AgentMessage) atype.Message {
-	return atype.Message{
+func messageFromAgent(m *model.AgentMessage) *atype.Message {
+	return &atype.Message{
 		ID:        m.ID,
 		SessionID: m.SessionID,
 		PlanID:    m.PlanID,
@@ -117,5 +84,46 @@ func agentMessageFromPlan(m *atype.Message) *model.AgentMessage {
 		Content:   m.Content,
 		Metadata:  m.Metadata,
 		CreatedAt: m.CreatedAt,
+	}
+}
+
+func runtimeFromModel(m *model.WSRuntimeDoc) *atype.Runtime {
+	if m == nil {
+		return nil
+	}
+
+	return &atype.Runtime{
+		SessionID:          m.ID,
+		Graph:              append([]byte(nil), m.Graph...),
+		CheckpointID:       m.CheckpointID,
+		PlanID:             m.PlanID,
+		StepID:             m.StepID,
+		InterruptKind:      m.InterruptKind,
+		Status:             atype.RuntimeStatus(m.Status),
+		UpdatedAt:          m.UpdatedAt,
+		InterruptRequested: m.InterruptRequested,
+		PendingToolCall:     m.PendingToolCall,
+		PendingToolApproved: m.PendingToolApproved,
+		PlanAction:          m.PlanAction,
+	}
+}
+
+func runtimeToModel(m *atype.Runtime) *model.WSRuntimeDoc {
+	if m == nil {
+		return nil
+	}
+	return &model.WSRuntimeDoc{
+		ID:                 m.SessionID,
+		Graph:              m.Graph,
+		CheckpointID:       m.CheckpointID,
+		PlanID:             m.PlanID,
+		StepID:             m.StepID,
+		InterruptKind:      m.InterruptKind,
+		Status:             string(m.Status),
+		UpdatedAt:          m.UpdatedAt,
+		InterruptRequested: m.InterruptRequested,
+		PendingToolCall:     m.PendingToolCall,
+		PendingToolApproved: m.PendingToolApproved,
+		PlanAction:          m.PlanAction,
 	}
 }

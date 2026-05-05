@@ -6,39 +6,6 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// Status 与 model.PlanStatus 取值一致。
-type Status string
-
-const (
-	StatusDraft     Status = "draft"
-	StatusReady     Status = "ready"
-	StatusExecuting Status = "executing"
-	StatusPaused    Status = "paused"
-	StatusCompleted Status = "completed"
-	StatusFailed    Status = "failed"
-)
-
-type StepStatus string
-
-const (
-	StepStatusPending   StepStatus = "pending"
-	StepStatusRunning   StepStatus = "running"
-	StepStatusPaused    StepStatus = "paused"
-	StepStatusCompleted StepStatus = "completed"
-	StepStatusFailed    StepStatus = "failed"
-	StepStatusSkipped   StepStatus = "skipped"
-)
-
-// Step 与 model.Step 对齐。
-type Step struct {
-	ID          string     `json:"id" bson:"id"`
-	Title       string     `json:"title" bson:"title"`
-	Description string     `json:"description" bson:"description"`
-	Result      string     `json:"result,omitempty" bson:"result,omitempty"`
-	Status      StepStatus `json:"status" bson:"status"`
-}
-
-// Session 与 model.ChatSession 对齐（对话线程容器）。
 type Session struct {
 	ID            string    `json:"id" bson:"_id"`
 	UserID        string    `json:"user_id" bson:"user_id"`
@@ -47,25 +14,21 @@ type Session struct {
 	UpdatedAt     time.Time `json:"updated_at" bson:"updated_at"`
 }
 
-// Checkpoint 与 model.Checkpoint 对齐。
-type Checkpoint struct {
-	ID        string    `json:"id" bson:"id"`
-	StepID    string    `json:"step_id" bson:"step_id"`
-	Question  string    `json:"question" bson:"question"`
-	CreatedAt time.Time `json:"created_at" bson:"created_at"`
+type Plan struct {
+	ID            string    `json:"id" bson:"_id"`
+	SessionID     string    `json:"session_id,omitempty" bson:"session_id,omitempty"`
+	Goal          string    `json:"goal" bson:"goal"`
+	Steps         []Step    `json:"steps" bson:"steps"`
+	CurrentStepID string    `json:"current_step_id,omitempty" bson:"current_step_id,omitempty"`
+	CreatedAt     time.Time `json:"created_at" bson:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at" bson:"updated_at"`
 }
 
-// Plan 与 model.Plan 对齐。
-type Plan struct {
-	ID            string      `json:"id" bson:"_id"`
-	SessionID     string      `json:"session_id,omitempty" bson:"session_id,omitempty"`
-	Goal          string      `json:"goal" bson:"goal"`
-	Steps         []Step      `json:"steps" bson:"steps"`
-	Status        Status      `json:"status" bson:"status"`
-	CurrentStepID string      `json:"current_step_id,omitempty" bson:"current_step_id,omitempty"`
-	Checkpoint    *Checkpoint `json:"checkpoint,omitempty" bson:"checkpoint,omitempty"`
-	CreatedAt     time.Time   `json:"created_at" bson:"created_at"`
-	UpdatedAt     time.Time   `json:"updated_at" bson:"updated_at"`
+type Step struct {
+	ID          string `json:"id" bson:"id"`
+	Title       string `json:"title" bson:"title"`
+	Description string `json:"description" bson:"description"`
+	Result      string `json:"result,omitempty" bson:"result,omitempty"`
 }
 
 type MessageRole string
@@ -73,20 +36,29 @@ type MessageRole string
 const (
 	RoleUser       MessageRole = "user"
 	RoleAssistant  MessageRole = "assistant"
+	RoleSystem     MessageRole = "system"
 	RoleToolCall   MessageRole = "tool_call"
 	RoleToolResult MessageRole = "tool_result"
 )
 
-// Message 与 model.AgentMessage 对齐。
 type Message struct {
 	ID        string         `json:"id" bson:"_id"`
-	SessionID string         `json:"session_id,omitempty" bson:"session_id,omitempty"`
+	SessionID string         `json:"session_id" bson:"session_id"`
 	PlanID    string         `json:"plan_id" bson:"plan_id"`
 	StepID    string         `json:"step_id,omitempty" bson:"step_id,omitempty"`
 	Role      MessageRole    `json:"role" bson:"role"`
 	Content   string         `json:"content" bson:"content"`
 	Metadata  map[string]any `json:"metadata,omitempty" bson:"metadata,omitempty"`
 	CreatedAt time.Time      `json:"created_at" bson:"created_at"`
+}
+
+type ExecutionContext struct {
+	SessionID string
+	Plan      *Plan
+	Step      *Step
+	Messages  []*Message
+	IsResume  bool
+	InterruptRequested bool
 }
 
 type Request struct {
@@ -102,9 +74,43 @@ type Result struct {
 }
 
 type StepResult struct {
-	StepID    string     `json:"step_id"`
-	Output    string     `json:"output"`
-	Paused    bool       `json:"paused"`
-	Completed bool       `json:"completed"`
-	Messages  []*Message `json:"messages"`
+	StepID          string     `json:"step_id"`
+	Output          string     `json:"output"`
+	Paused          bool       `json:"paused"`
+	Completed       bool       `json:"completed"`
+	Messages        []*Message `json:"messages"`
+	PausedKind      string     `json:"pause_kind"`
+	PendingToolCall string     `json:"pending_tool_call,omitempty"`
+}
+
+type RuntimeStatus string
+
+const (
+	RuntimeInterrupted          RuntimeStatus = "interrupted"
+	RuntimeCompleted            RuntimeStatus = "completed"
+	RuntimeRunning              RuntimeStatus = "running"
+	RuntimePendingPlanApproval  RuntimeStatus = "pending_plan_approval"
+	RuntimeApproved             RuntimeStatus = "approved"
+	RuntimePendingToolApproval  RuntimeStatus = "pending_tool_approval"
+)
+
+type Runtime struct {
+	SessionID          string
+	Graph              []byte
+	CheckpointID       string
+	PlanID             string
+	StepID             string
+	InterruptKind      string
+	Status             RuntimeStatus `json:"status"`
+	UpdatedAt          time.Time
+	InterruptRequested bool `json:"interrupt_requested,omitempty"`
+	PendingToolCall    string `json:"pending_tool_call,omitempty"`
+	PendingToolApproved bool  `json:"pending_tool_approved,omitempty"`
+	PlanAction         string `json:"plan_action,omitempty"`
+}
+
+// PendingToolCallInfo 序列化到 Runtime.PendingToolCall
+type PendingToolCallInfo struct {
+	ToolName  string `json:"tool_name"`
+	Arguments string `json:"arguments"`
 }

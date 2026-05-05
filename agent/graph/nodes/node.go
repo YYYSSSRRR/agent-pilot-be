@@ -12,8 +12,9 @@ type Node interface {
 }
 
 type State struct {
-	Request  atype.Request
-	Decision *scheduler.Decision
+	Request  *atype.Request
 	Plan     *atype.Plan
+	Runtime  *atype.Runtime
+	Decision *scheduler.Decision
 	Result   *atype.Result
 }
